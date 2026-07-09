@@ -1,0 +1,38 @@
+name: Backup giornaliero volumi
+
+on:
+  schedule:
+    # 21:45 UTC nei giorni feriali = 22:45 (inverno) / 23:45 (estate) ora italiana.
+    # Sempre DOPO la chiusura sia di Borsa Italiana (17:30) sia di Wall Street
+    # (21:00/22:00 UTC), in ogni stagione: un solo cron, nessun problema di DST.
+    - cron: "45 21 * * 1-5"
+  workflow_dispatch: {}   # avvio manuale dal tab Actions per test
+
+permissions:
+  contents: write         # il token automatico di Actions basta: nessun PAT
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo archivio
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Installa dipendenze
+        run: pip install yfinance pandas
+
+      - name: Scarica e salva i volumi della giornata
+        run: python daily_backup.py
+
+      - name: Commit e push
+        run: |
+          git config user.name "backup-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "backup volumi $(date -u +%F)" || echo "Nessuna modifica da salvare"
+          git push
