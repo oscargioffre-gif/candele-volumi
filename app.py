@@ -26,6 +26,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+
+GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"]
+GITHUB_REPO = "oscargioffre-gif/candele-volumi"
 import yfinance as yf
 
 # ---------------------------------------------------------------- COSTANTI --
