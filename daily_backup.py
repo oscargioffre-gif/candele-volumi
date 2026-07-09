@@ -19,8 +19,8 @@ import yfinance as yf
 
 TIMEFRAMES = ["5m", "15m", "30m", "1h"]
 WATCHLIST = "watchlist.json"
-INDEX = "archive/index.json"
-STORICO = "storico.csv"
+INDEX = "archivio/index.json"
+STORICO = "archivio/storico.csv"
 
 
 def tipo_candela(o, c):
@@ -88,7 +88,7 @@ def main():
             continue
 
         # snapshot: merge con eventuale salvataggio manuale dello stesso giorno
-        cartella = os.path.join("archive", symbol.replace(".", "_"))
+        cartella = os.path.join("archivio", symbol.replace(".", "_"))
         os.makedirs(cartella, exist_ok=True)
         file_path = os.path.join(cartella, f"{data_str}.json.gz")
 
@@ -106,7 +106,7 @@ def main():
         indice = [r for r in indice if r["p"] != record["p"]] + [record]
         print(f"{symbol}: salvato {data_str} ({', '.join(sorted(tfs))})")
 
-    os.makedirs("archive", exist_ok=True)
+    os.makedirs("archivio", exist_ok=True)
     with open(INDEX, "w", encoding="utf-8") as f:
         json.dump(indice, f, separators=(",", ":"))
 
