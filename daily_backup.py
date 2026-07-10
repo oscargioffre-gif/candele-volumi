@@ -19,8 +19,8 @@ import yfinance as yf
 
 TIMEFRAMES = ["5m", "15m", "30m", "1h"]
 WATCHLIST = "watchlist.json"
-INDEX = "archivio/index.json"
-STORICO = "archivio/storico.csv"
+INDEX = "archive/index.json"
+STORICO = "storico.csv"
 
 
 def tipo_candela(o, c):
@@ -38,9 +38,14 @@ def leggi_json(path, default):
     return default
 
 
-def scarica(symbol, interval):
+REGOLE_RESAMPLE = {"15m": "15min", "30m": "30min", "1h": "60min"}
+
+
+def scarica_5m(symbol):
+    """Dati 5m dell'intera sessione regolare, asta di chiusura inclusa.
+    Una sola chiamata per titolo: i timeframe superiori si aggregano in locale."""
     df = yf.Ticker(symbol).history(
-        period="1d", interval=interval, prepost=False, auto_adjust=False
+        period="1d", interval="5m", prepost=False, auto_adjust=False
     )
     if df is None or df.empty:
         return None
@@ -51,6 +56,21 @@ def scarica(symbol, interval):
     if df.index.tz is not None:
         df.index = df.index.tz_convert("Europe/Rome")
     return df
+
+
+def aggrega(df5, interval):
+    """15m/30m/1h costruiti dai 5m: l'ultima candela arriva alla chiusura
+    reale (17:30-17:35 per Milano), nessun troncamento alle 17:00."""
+    if interval == "5m":
+        return df5
+    agg = (
+        df5.resample(REGOLE_RESAMPLE[interval], origin="start_day",
+                     label="left", closed="left")
+           .agg(Open=("Open", "first"), Close=("Close", "last"),
+                Volume=("Volume", "sum"))
+           .dropna()
+    )
+    return agg[agg["Volume"] > 0]
 
 
 def main():
@@ -66,9 +86,14 @@ def main():
         symbol, nome = voce["s"], voce.get("n", voce["s"])
         tfs, data_str = {}, None
 
+        df5 = scarica_5m(symbol)
+        if df5 is None:
+            print(f"{symbol}: nessun dato (mercato chiuso o titolo illiquido), salto.")
+            continue
+
         for tf in TIMEFRAMES:
-            df = scarica(symbol, tf)
-            if df is None:
+            df = aggrega(df5, tf)
+            if df.empty:
                 continue
             data_str = df.index[-1].strftime("%Y-%m-%d")
             candele = []
@@ -88,7 +113,7 @@ def main():
             continue
 
         # snapshot: merge con eventuale salvataggio manuale dello stesso giorno
-        cartella = os.path.join("archivio", symbol.replace(".", "_"))
+        cartella = os.path.join("archive", symbol.replace(".", "_"))
         os.makedirs(cartella, exist_ok=True)
         file_path = os.path.join(cartella, f"{data_str}.json.gz")
 
@@ -106,7 +131,7 @@ def main():
         indice = [r for r in indice if r["p"] != record["p"]] + [record]
         print(f"{symbol}: salvato {data_str} ({', '.join(sorted(tfs))})")
 
-    os.makedirs("archivio", exist_ok=True)
+    os.makedirs("archive", exist_ok=True)
     with open(INDEX, "w", encoding="utf-8") as f:
         json.dump(indice, f, separators=(",", ":"))
 

@@ -157,18 +157,63 @@ def cerca_simbolo(query: str):
 # ------------------------------------------------------------- DATI INTRADAY --
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def scarica_intraday(symbol: str, interval: str) -> pd.DataFrame:
-    """Candele intraday della giornata corrente, SOLO sessione regolare
-    (prepost=False esclude pre-market e after-hours)."""
-    tk = yf.Ticker(symbol)
-    df = tk.history(period="1d", interval=interval, prepost=False, auto_adjust=False)
+# Aggregazione locale: si scarica SEMPRE il 5m e si costruiscono 15m/30m/1h
+# in pandas. Vantaggi: l'ultima candela arriva alla chiusura reale del mercato
+# (17:30-17:35 per Milano, asta di chiusura inclusa) e i quattro timeframe
+# sono sempre coerenti tra loro, senza i troncamenti delle candele native Yahoo.
+REGOLE_RESAMPLE = {"15m": "15min", "30m": "30min", "1h": "60min"}
+
+
+def _pulisci(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
     df = df[["Open", "Close", "Volume"]].copy()
-    df = df[df["Volume"] > 0]           # scarta barre vuote
-    df.index = df.index.tz_convert("Europe/Rome") if df.index.tz else df.index
+    df = df[df["Volume"] > 0]
+    if not df.empty and df.index.tz is not None:
+        df.index = df.index.tz_convert("Europe/Rome")
     return df
+
+
+def _aggrega_da_5m(df5: pd.DataFrame, interval: str) -> pd.DataFrame:
+    """15m/30m/1h costruiti dai 5m: la candela finale ingloba anche gli
+    ultimi scambi e l'asta di chiusura, qualunque sia il timeframe."""
+    if interval == "5m":
+        return df5
+    agg = (
+        df5.resample(REGOLE_RESAMPLE[interval], origin="start_day",
+                     label="left", closed="left")
+           .agg(Open=("Open", "first"), Close=("Close", "last"),
+                Volume=("Volume", "sum"))
+           .dropna()
+    )
+    return agg[agg["Volume"] > 0]
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def scarica_intraday(symbol: str, interval: str) -> pd.DataFrame:
+    """Candele intraday della giornata, SOLO sessione regolare, fino alla
+    chiusura reale del mercato (nessun taglio alle 17:00):
+    1) finestra esplicita da mezzanotte a ora+1h sui dati 5m;
+    2) se vuota (weekend/festivo), ultima sessione disponibile sempre a 5m;
+    3) fallback estremo: candele native del timeframe richiesto."""
+    tk = yf.Ticker(symbol)
+    ora = pd.Timestamp.now(tz="Europe/Rome")
+
+    df5 = _pulisci(tk.history(
+        start=ora.normalize(), end=ora + pd.Timedelta(hours=1),
+        interval="5m", prepost=False, auto_adjust=False,
+    ))
+    if df5.empty:  # mercato chiuso oggi: ultima sessione disponibile
+        df5 = _pulisci(tk.history(
+            period="1d", interval="5m", prepost=False, auto_adjust=False,
+        ))
+    if not df5.empty:
+        return _aggrega_da_5m(df5, interval)
+
+    # fallback estremo: dati nativi al timeframe richiesto
+    return _pulisci(tk.history(
+        period="1d", interval=interval, prepost=False, auto_adjust=False,
+    ))
 
 
 @st.cache_data(ttl=60, show_spinner=False)
