@@ -26,9 +26,6 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
-
-GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"]
-GITHUB_REPO = "oscargioffre-gif/candele-volumi"
 import yfinance as yf
 
 # ---------------------------------------------------------------- COSTANTI --
@@ -90,6 +87,13 @@ st.markdown(
     .stButton button:hover {{ border-color: {VERDE}; color: {VERDE}; }}
 
     div[data-baseweb="segmented-control"] {{ background: {PANNELLO}; }}
+
+    /* Slider "dita grandi": maniglia e traccia ben spesse, facili da afferrare */
+    div[data-baseweb="slider"] div[role="slider"] {{
+        width: 30px !important; height: 30px !important;
+        background: {VERDE} !important; border: 3px solid #0B3D20 !important;
+    }}
+    div[data-baseweb="slider"] > div > div {{ height: 10px !important; }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -188,12 +192,18 @@ ORO = "#FFD54F"          # bordo delle barre con volume anomalo
 SOGLIA_ANOMALIA = 3.0    # volume ≥ 3× la mediana di giornata = possibile mano forte
 
 
-def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str) -> go.Figure:
+def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str,
+                      zoom_pct: int = 100) -> go.Figure:
     """Grafico a barre di volume: altezza = volume, colore = direzione candela.
-    Etichetta su due righe: volume (K/M) + prezzo di chiusura con variazione %
-    rispetto all'APERTURA DEL GIORNO. Le barre con volume ≥ SOGLIA_ANOMALIA ×
-    la mediana di giornata sono evidenziate in oro con il moltiplicatore (×N):
-    sono le candele da osservare per possibili accumuli/distribuzioni."""
+    Etichetta su due righe: volume (K/M) + prezzo chiusura + var % vs apertura
+    del giorno. Barre ≥ SOGLIA_ANOMALIA × mediana evidenziate in oro (×N).
+
+    Mobile UX:
+    - dragmode disattivato → il dito che scorre sul grafico NON zooma:
+      lo scroll verticale della pagina ha sempre la priorità;
+    - navigatore orizzontale spesso sotto il grafico (rangeslider) per
+      scorrere/zoomare nel tempo trascinando le maniglie;
+    - zoom_pct (10-100) limita l'asse Y per ingrandire le barre piccole."""
     n = len(df)
     # etichette grandi, ridotte solo quando le barre diventano tante
     size_txt = 17 if n <= 14 else 15 if n <= 26 else 13 if n <= 44 else 11
@@ -204,6 +214,11 @@ def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str) -> go.Figur
     anomala = rvol >= SOGLIA_ANOMALIA
 
     labels = [ts.strftime("%H:%M") for ts in df.index]
+    x_idx = list(range(n))                       # asse lineare: serve al rangeslider
+    passo = max(1, n // 10)
+    tickvals = x_idx[::passo]
+    ticktext = labels[::passo]
+
     colori = [colore_candela(o, c) for o, c in zip(df["Open"], df["Close"])]
     bordi = [ORO if a else "rgba(0,0,0,0)" for a in anomala]
     spess = [2.5 if a else 0 for a in anomala]
@@ -219,7 +234,7 @@ def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str) -> go.Figur
 
     fig = go.Figure(
         go.Bar(
-            x=labels,
+            x=x_idx,
             y=df["Volume"],
             marker_color=colori,
             marker_line=dict(color=bordi, width=spess),
@@ -227,13 +242,15 @@ def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str) -> go.Figur
             textposition="outside",
             textfont=dict(family="Inter", size=size_txt, color=TESTO),
             textangle=0,
+            cliponaxis=True,   # con lo zoom verticale le etichette non escono dal grafico
             customdata=list(zip(
                 df["Open"].round(4), df["Close"].round(4),
                 var_candela.round(2), var_giorno.round(2),
                 [fmt_vol(v) for v in df["Volume"]], rvol.round(1),
+                labels,
             )),
             hovertemplate=(
-                "<b>%{x}</b><br>"
+                "<b>%{customdata[6]}</b><br>"
                 "Open %{customdata[0]}  ·  Close %{customdata[1]}<br>"
                 "Var candela %{customdata[2]}%<br>"
                 "Var da apertura giorno <b>%{customdata[3]}%</b><br>"
@@ -248,19 +265,47 @@ def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str) -> go.Figur
         plot_bgcolor=SFONDO,
         font=dict(family="Inter", color=TESTO),
         margin=dict(l=10, r=10, t=48, b=10),
-        height=640,
+        height=680,
         bargap=0.25,
         showlegend=False,
         hoverlabel=dict(bgcolor=PANNELLO, font_family="Inter"),
-        transition=dict(duration=250),
+        dragmode=False,        # il drag col dito NON zooma: la pagina scorre
     )
-    fig.update_xaxes(showgrid=False, tickfont=dict(size=11, color=TESTO_SOFT))
+    fig.update_xaxes(
+        showgrid=False,
+        tickvals=tickvals, ticktext=ticktext,
+        tickfont=dict(size=12, color=TESTO_SOFT),
+        range=[-0.6, n - 0.4],
+        # "scrollbar" orizzontale: spessa, trascinabile, sotto il grafico
+        rangeslider=dict(
+            visible=True,
+            thickness=0.16,
+            bgcolor=PANNELLO,
+            bordercolor=GRIGLIA,
+            borderwidth=1,
+        ),
+    )
     fig.update_yaxes(
         gridcolor=GRIGLIA, gridwidth=0.4, zeroline=False,
-        tickfont=dict(size=11, color=TESTO_SOFT),
-        range=[0, float(df["Volume"].max()) * 1.35]  # spazio per etichette grandi a due righe
+        tickfont=dict(size=12, color=TESTO_SOFT),
+        fixedrange=True,       # niente zoom accidentale in verticale
+        # zoom Y esplicito via slider: 100% = tutto, 10% = ingrandisce le barre piccole
+        range=[0, float(df["Volume"].max()) * 1.35 * max(10, min(100, zoom_pct)) / 100],
     )
     return fig
+
+
+# Configurazione Plotly condivisa: via i pulsanti di zoom/pan (fonte di tocchi
+# accidentali su mobile); restano fotocamera PNG e doppio tap per il reset.
+CONFIG_GRAFICO = {
+    "displaylogo": False,
+    "scrollZoom": False,
+    "doubleClick": "reset",
+    "modeBarButtonsToRemove": [
+        "zoom2d", "pan2d", "select2d", "lasso2d",
+        "zoomIn2d", "zoomOut2d", "autoScale2d",
+    ],
+}
 
 
 # --------------------------------------------------- PERSISTENZA SU GITHUB --
@@ -463,9 +508,16 @@ with tab_live:
                     unsafe_allow_html=True,
                 )
 
-                fig = costruisci_figura(df, f"Volumi {tf_label} — {df.index[-1]:%d/%m/%Y}", tf_label)
+                zoom_v = st.slider(
+                    "🔍 Zoom verticale — riduci per ingrandire le barre piccole",
+                    min_value=10, max_value=100, value=100, step=10, format="%d%%",
+                    key="zoom_live",
+                )
+                fig = costruisci_figura(
+                    df, f"Volumi {tf_label} — {df.index[-1]:%d/%m/%Y}", tf_label, zoom_v
+                )
                 st.plotly_chart(fig, use_container_width=True, config={
-                    "displaylogo": False,
+                    **CONFIG_GRAFICO,
                     "toImageButtonOptions": {"format": "png", "filename": f"{symbol}_volumi", "scale": 2},
                 })
 
@@ -575,10 +627,15 @@ with tab_archivio:
                         """,
                         unsafe_allow_html=True,
                     )
+                    zoom_a = st.slider(
+                        "🔍 Zoom verticale — riduci per ingrandire le barre piccole",
+                        min_value=10, max_value=100, value=100, step=10, format="%d%%",
+                        key="zoom_arch",
+                    )
                     st.plotly_chart(
-                        costruisci_figura(df_s, f"Volumi {tf_lbl} — {snap['d']}", tf_lbl),
+                        costruisci_figura(df_s, f"Volumi {tf_lbl} — {snap['d']}", tf_lbl, zoom_a),
                         use_container_width=True,
-                        config={"displaylogo": False},
+                        config=CONFIG_GRAFICO,
                     )
                 else:
                     st.error("Impossibile leggere lo snapshot dal repository.")
