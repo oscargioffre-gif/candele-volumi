@@ -31,6 +31,8 @@ import yfinance as yf
 # ---------------------------------------------------------------- COSTANTI --
 
 VERDE = "#00C853"
+ORO = "#FFD54F"          # anomalie di volume (bordo barre, sessione sopra media)
+SOGLIA_ANOMALIA = 3.0    # volume ≥ 3× la mediana di giornata = possibile mano forte
 ROSSO = "#E53935"
 GRIGIO = "#8A8F98"
 SFONDO = "#101010"
@@ -70,6 +72,24 @@ st.markdown(
         border-bottom: 1px solid {GRIGLIA}; padding-bottom: 10px; margin-bottom: 4px;
     }}
     .vh-ticker  {{ font-size: 1.9rem; font-weight: 800; letter-spacing: .5px; }}
+
+    /* Widget "Analisi Volume" accanto al ticker */
+    .vh-stats {{ display: flex; gap: 22px; margin-left: 14px; align-items: baseline; }}
+    .vh-stat-l {{
+        font-size: .62rem; letter-spacing: .09em; color: {TESTO_SOFT};
+        text-transform: uppercase; margin-bottom: 1px;
+    }}
+    .vh-stat-v {{
+        font-size: 1.15rem; font-weight: 600; color: {TESTO};
+        font-variant-numeric: tabular-nums; line-height: 1.1;
+    }}
+    .vh-stat-v.sopra-media {{ color: {ORO}; }}
+    .vh-freccia {{ color: {VERDE}; font-size: .95rem; }}
+    @keyframes volFlash {{
+        0%   {{ text-shadow: 0 0 12px {VERDE}; }}
+        100% {{ text-shadow: none; }}
+    }}
+    .vh-flash {{ animation: volFlash 1.2s ease-out 1; }}
     .vh-name    {{ font-size: 1.0rem; color: {TESTO_SOFT}; }}
     .vh-price   {{ font-size: 1.6rem; font-weight: 600; margin-left: auto; }}
     .vh-up      {{ color: {VERDE}; }}
@@ -218,6 +238,27 @@ def scarica_intraday(symbol: str, interval: str) -> pd.DataFrame:
     ))
 
 
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def volume_medio_3m(symbol: str):
+    """Volume medio GIORNALIERO degli ultimi 3 mesi (statico per la sessione:
+    cache 6 ore, si aggiorna di fatto a fine giornata)."""
+    try:
+        h = yf.Ticker(symbol).history(period="3mo", interval="1d",
+                                      prepost=False, auto_adjust=False)
+        if h is None or h.empty:
+            return None
+        v = h["Volume"]
+        v = v[v > 0]
+        return int(v.mean()) if len(v) else None
+    except Exception:
+        return None
+
+
+def fmt_int_it(n) -> str:
+    """Intero con separatore delle migliaia in stile italiano: 2.310.450."""
+    return f"{int(n):,}".replace(",", ".")
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def prezzo_attuale(symbol: str):
     """Ultimo prezzo + chiusura del giorno precedente. La chiusura precedente
@@ -254,8 +295,6 @@ def fmt_px(p: float) -> str:
     return f"{p:.4f}" if p < 1 else (f"{p:.3f}" if p < 10 else f"{p:.2f}")
 
 
-ORO = "#FFD54F"          # bordo delle barre con volume anomalo
-SOGLIA_ANOMALIA = 3.0    # volume ≥ 3× la mediana di giornata = possibile mano forte
 BARRE_VISIBILI = 4       # candele per pagina: colonne larghissime, etichette senza sovrapposizioni
 VERDE_TESTO = "#00E676"  # variazione positiva vs chiusura precedente
 ROSSO_TESTO = "#FF5252"  # variazione negativa vs chiusura precedente
@@ -683,13 +722,32 @@ with tab_live:
                 prezzo_txt = f"{ultimo:,.3f}{var_txt}" if ultimo else "—"
                 agg = datetime.now().strftime("%H:%M:%S")
 
+                # --- Analisi Volume: medio trimestrale (statico) + totale sessione ---
+                vol_3m = volume_medio_3m(symbol)
+                vol_sess = int(df["Volume"].sum())   # cumulativo: cresce solo, per natura
+                chiave_vs = f"volsess_{symbol}_{df.index[-1]:%Y%m%d}"
+                in_aumento = vol_sess > st.session_state.get(chiave_vs, 0)
+                st.session_state[chiave_vs] = vol_sess
+
+                sopra_media = " sopra-media" if (vol_3m and vol_sess > vol_3m) else ""
+                flash = " vh-flash" if in_aumento else ""
+                freccia = "<span class='vh-freccia'> ▲</span>" if in_aumento else ""
+                stats_html = f"""
+                      <div class="vh-stats">
+                        <div><div class="vh-stat-l">Vol. med. trim.</div>
+                             <div class="vh-stat-v">{fmt_int_it(vol_3m) if vol_3m else '—'}</div></div>
+                        <div><div class="vh-stat-l">Vol. tot. sess.</div>
+                             <div class="vh-stat-v{sopra_media}{flash}">{fmt_int_it(vol_sess)}{freccia}</div></div>
+                      </div>"""
+
                 st.markdown(
                     f"""
                     <div class="vh-header">
                       <span class="vh-ticker">{symbol}</span>
                       <span class="vh-name">{nome} · {borsa}</span>
+                      {stats_html}
                       <span class="vh-price {classe}">{prezzo_txt}</span>
-                      <span class="vh-meta">Sessione regolare · {tf_label} · aggiornato {agg}</span>
+                      <span class="vh-meta">Sessione regolare · {tf_label} · aggiornato {agg} · sessione in oro se sopra la media 3M</span>
                     </div>
                     """,
                     unsafe_allow_html=True,
