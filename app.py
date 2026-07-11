@@ -256,7 +256,7 @@ def fmt_px(p: float) -> str:
 
 ORO = "#FFD54F"          # bordo delle barre con volume anomalo
 SOGLIA_ANOMALIA = 3.0    # volume ≥ 3× la mediana di giornata = possibile mano forte
-BARRE_VISIBILI = 12      # candele visibili di default: larghe e leggibili su mobile
+BARRE_VISIBILI = 4       # candele per pagina: colonne larghissime, etichette senza sovrapposizioni
 VERDE_TESTO = "#00E676"  # variazione positiva vs chiusura precedente
 ROSSO_TESTO = "#FF5252"  # variazione negativa vs chiusura precedente
 
@@ -317,21 +317,47 @@ def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str,
     bordi = [ORO if a else "rgba(0,0,0,0)" for a in anomala]
     spess = [2.5 if a else 0 for a in anomala]
 
-    # ------------------------------------------------- STRUTTURA ETICHETTA --
-    # Riga 1 (13px): volume + eventuale anomalia ×N
-    # Riga 2 (20px, bold, colore condizionale): prezzo + var CUMULATIVA vs ieri
-    # Riga 3 (12px, grigio): Δ scostamento vs candela precedente
-    etichette = [
-        (
-            f"<b>{fmt_vol(v)}{f' ×{r:.1f}' if a else ''}</b><br>"
-            f"<span style='font-size:20px;color:{col}'><b>{fmt_px(c)} {pc:+.2f}%</b></span><br>"
-            f"<span style='font-size:12px;color:{TESTO_SOFT}'>Δ {pdlt:+.2f}%</span>"
+    # limite superiore asse Y: serve a decidere dove sta il testo di ogni barra
+    y_max = float(df["Volume"].max()) * 1.65 * max(10, min(100, zoom_pct)) / 100
+
+    # ------------------------------------------------- STRUTTURE ETICHETTE --
+    # Regola ADATTIVA (risolve in modo definitivo le sovrapposizioni):
+    # - barra ALTA  (>=16% del grafico): prezzo + Δ centrati DENTRO la barra;
+    # - barra BASSA (<16%): non c'è spazio fisico → prezzo + Δ salgono nel
+    #   blocco SOPRA la barra, in coda alla %. Un blocco unico impilato da
+    #   Plotly non può sovrapporsi per costruzione.
+    # Tra volume e % c'è sempre una riga distanziatrice (9px) per dare aria.
+    SOGLIA_INTERNO = 0.16
+    corta = [v < y_max * SOGLIA_INTERNO for v in df["Volume"]]
+    SPAZIO = "<br><span style='font-size:9px'>\u200b</span><br>"
+
+    etichette, testo_interno = [], []
+    for v, c, pc, pdlt, r, a, col, bassa in zip(
+        df["Volume"], df["Close"], var_cum, var_delta, rvol, anomala, colori_cum, corta
+    ):
+        blocco = (
+            f"<b>{fmt_vol(v)}{f' ×{r:.1f}' if a else ''}</b>"
+            f"{SPAZIO}"
+            f"<span style='font-size:26px;color:{col}'><b>{pc:+.2f}%</b></span>"
         )
-        for v, c, pc, pdlt, r, a, col in zip(
-            df["Volume"], df["Close"], var_cum, var_delta, rvol, anomala, colori_cum
+        interno = (
+            f"<b>{fmt_px(c)}</b><br>"
+            f"<span style='font-size:15px'>Δ {pdlt:+.2f}%</span>"
         )
-    ]
+        if bassa:  # barra troppo bassa: prezzo e Δ salgono sopra, dentro niente
+            blocco += (
+                f"<br><b>{fmt_px(c)}</b>"
+                f"<br><span style='font-size:15px;color:{TESTO_SOFT}'>Δ {pdlt:+.2f}%</span>"
+            )
+            interno = ""
+        etichette.append(blocco)
+        testo_interno.append(interno)
+
     var_candela = (df["Close"] / df["Open"] - 1) * 100
+
+    # centro verticale della parte VISIBILE delle barre alte: mai oltre il
+    # taglio dello zoom (per le basse il testo interno è vuoto)
+    y_centro = [min(v / 2, y_max * 0.45) for v in df["Volume"]]
 
     fig = go.Figure(
         go.Bar(
@@ -342,7 +368,7 @@ def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str,
             text=etichette,
             textposition="outside",
             # font base (volume e prezzo): la % ha il proprio span da 20px
-            textfont=dict(family="Inter", size=13, color=TESTO),
+            textfont=dict(family="Inter", size=16, color=TESTO),
             textangle=0,
             cliponaxis=True,   # con lo zoom verticale le etichette non escono dal grafico
             customdata=list(zip(
@@ -361,14 +387,26 @@ def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str,
             ),
         )
     )
+    # testo DENTRO le barre: prezzo + Δ, bianco pieno per il massimo contrasto
+    fig.add_trace(
+        go.Scatter(
+            x=x_idx, y=y_centro,
+            mode="text",
+            text=testo_interno,
+            textfont=dict(family="Inter", size=18, color="#FFFFFF"),
+            hoverinfo="skip",
+            showlegend=False,
+            cliponaxis=True,
+        )
+    )
     fig.update_layout(
         title=dict(text=titolo, font=dict(family="Inter", size=14, color=TESTO_SOFT)),
         paper_bgcolor=SFONDO,
         plot_bgcolor=SFONDO,
         font=dict(family="Inter", color=TESTO),
         margin=dict(l=10, r=10, t=48, b=10),
-        height=680,
-        bargap=0.12,           # colonne larghe: il grosso dello spazio è barra
+        height=500,   # basso e largo: proporzioni da smartphone
+        bargap=0.10,           # colonne larghissime: quasi tutto lo spazio è barra
         showlegend=False,
         hoverlabel=dict(bgcolor=PANNELLO, font=dict(family="Inter", size=14)),
         dragmode=False,        # il drag col dito NON zooma: la pagina scorre
@@ -391,7 +429,7 @@ def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str,
         tickfont=dict(size=13, color=TESTO),
         fixedrange=True,       # niente zoom accidentale in verticale
         # zoom Y esplicito via slider: 100% = tutto, 10% = ingrandisce le barre piccole
-        range=[0, float(df["Volume"].max()) * 1.50 * max(10, min(100, zoom_pct)) / 100],
+        range=[0, y_max],
     )
     return fig
 
