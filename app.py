@@ -243,22 +243,32 @@ ROSSO_TESTO = "#FF5252"  # variazione negativa vs chiusura precedente
 def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str,
                       zoom_pct: int = 100, chiusura_prec: float = None) -> go.Figure:
     """Grafico a barre di volume: altezza = volume, colore barra = direzione
-    candela. Etichetta grande su due righe: volume (K/M) + prezzo con la
-    variazione % rispetto alla CHIUSURA DEL GIORNO PRECEDENTE; l'etichetta è
-    VERDE se il titolo in quel momento guadagna, ROSSA se perde.
+    candela. Etichetta su tre righe sopra ogni barra:
+      1) volume (K/M), con ×N se anomalo;
+      2) prezzo di chiusura della candela;
+      3) VARIAZIONE % — grande (20px) e prioritaria — della chiusura di
+         OGNI candela rispetto alla CHIUSURA DELLA CANDELA PRECEDENTE
+         (la prima candela si confronta con la chiusura del giorno prima).
+    Colore della %: VERDE se >= 0, ROSSO se < 0, tassativamente.
     Barre ≥ SOGLIA_ANOMALIA × mediana bordate in oro con il moltiplicatore ×N.
+
+    'chiusura_prec' (chiusura del giorno precedente) fa da base alla PRIMA
+    candela della giornata; per i vecchi snapshot senza questo dato si usa
+    l'apertura della prima candela.
 
     Mobile UX: di default sono visibili le ultime BARRE_VISIBILI candele,
     larghe e ben distanziate; le precedenti si raggiungono trascinando il
     navigatore sotto il grafico. Drag disattivato: la pagina scorre sempre."""
     n = len(df)
 
-    # riferimento per la variazione %: chiusura del giorno precedente;
-    # se non disponibile (vecchi snapshot) si ripiega sull'apertura del giorno
-    if chiusura_prec and chiusura_prec > 0:
-        rif, rif_nome = float(chiusura_prec), "chiusura prec."
-    else:
-        rif, rif_nome = float(df["Open"].iloc[0]), "apertura giorno"
+    # base del delta %: la CHIUSURA DELLA CANDELA PRECEDENTE (candela per
+    # candela). La prima candela della giornata si confronta con la chiusura
+    # del giorno precedente; se non disponibile, con la propria apertura.
+    rif_serie = df["Close"].shift(1)
+    base_prima = (float(chiusura_prec) if (chiusura_prec and chiusura_prec > 0)
+                  else float(df["Open"].iloc[0]))
+    rif_serie.iloc[0] = base_prima
+    rif_nome = "candela prec."
 
     mediana = float(df["Volume"].median()) or 1.0
     rvol = df["Volume"] / mediana
@@ -274,15 +284,21 @@ def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str,
     bordi = [ORO if a else "rgba(0,0,0,0)" for a in anomala]
     spess = [2.5 if a else 0 for a in anomala]
 
-    var_rif = (df["Close"] / rif - 1) * 100
+    # variazione % di ogni chiusura rispetto alla chiusura della candela precedente
+    var_rif = (df["Close"] / rif_serie - 1) * 100
+    # coerenza rigorosa dei colori: VERDE se >= 0, ROSSO se < 0
+    colori_testo = [VERDE if p >= 0 else ROSSO for p in var_rif]
+
     etichette = [
-        (f"<b>{fmt_vol(v)} ×{r:.1f}</b><br><b>{fmt_px(c)} {p:+.2f}%</b>"
-         if a else
-         f"<b>{fmt_vol(v)}</b><br><b>{fmt_px(c)} {p:+.2f}%</b>")
-        for v, c, p, r, a in zip(df["Volume"], df["Close"], var_rif, rvol, anomala)
+        (
+            f"<b>{fmt_vol(v)}{f' ×{r:.1f}' if a else ''}</b><br>"
+            f"{fmt_px(c)}<br>"
+            f"<span style='font-size:20px;color:{col}'><b>{p:+.2f}%</b></span>"
+        )
+        for v, c, p, r, a, col in zip(
+            df["Volume"], df["Close"], var_rif, rvol, anomala, colori_testo
+        )
     ]
-    # color coding condizionale: etichetta verde se guadagna, rossa se perde
-    colori_testo = [VERDE_TESTO if p >= 0 else ROSSO_TESTO for p in var_rif]
     var_candela = (df["Close"] / df["Open"] - 1) * 100
 
     fig = go.Figure(
@@ -293,21 +309,21 @@ def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str,
             marker_line=dict(color=bordi, width=spess),
             text=etichette,
             textposition="outside",
-            # font grande e fisso: la finestra è limitata a BARRE_VISIBILI candele
-            textfont=dict(family="Inter", size=16, color=colori_testo),
+            # font base (volume e prezzo): la % ha il proprio span da 20px
+            textfont=dict(family="Inter", size=13, color=TESTO),
             textangle=0,
             cliponaxis=True,   # con lo zoom verticale le etichette non escono dal grafico
             customdata=list(zip(
                 df["Open"].round(4), df["Close"].round(4),
                 var_candela.round(2), var_rif.round(2),
                 [fmt_vol(v) for v in df["Volume"]], rvol.round(1),
-                labels,
+                labels, rif_serie.round(4),
             )),
             hovertemplate=(
                 "<b>%{customdata[6]}</b><br>"
                 "Open %{customdata[0]}  ·  Close %{customdata[1]}<br>"
                 "Var candela %{customdata[2]}%<br>"
-                f"Var vs {rif_nome} ({fmt_px(rif)}) " + "<b>%{customdata[3]}%</b><br>"
+                "Var vs chiusura prec. (%{customdata[7]}) <b>%{customdata[3]}%</b><br>"
                 "Volume <b>%{customdata[4]}</b> · ×%{customdata[5]} vs mediana"
                 "<extra></extra>"
             ),
@@ -347,7 +363,7 @@ def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str,
         tickfont=dict(size=13, color=TESTO),
         fixedrange=True,       # niente zoom accidentale in verticale
         # zoom Y esplicito via slider: 100% = tutto, 10% = ingrandisce le barre piccole
-        range=[0, float(df["Volume"].max()) * 1.35 * max(10, min(100, zoom_pct)) / 100],
+        range=[0, float(df["Volume"].max()) * 1.50 * max(10, min(100, zoom_pct)) / 100],
     )
     return fig
 
