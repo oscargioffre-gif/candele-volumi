@@ -26,6 +26,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 import yfinance as yf
 
 # ---------------------------------------------------------------- COSTANTI --
@@ -107,6 +108,10 @@ st.markdown(
     .stButton button:hover {{ border-color: {VERDE}; color: {VERDE}; }}
 
     div[data-baseweb="segmented-control"] {{ background: {PANNELLO}; }}
+
+    /* Gesture orizzontali sul grafico: pan-y lascia lo scroll VERTICALE
+       della pagina al browser; l'asse orizzontale lo gestiamo noi */
+    div[data-testid="stPlotlyChart"] {{ touch-action: pan-y; }}
 
     /* Slider "dita grandi": maniglia e traccia ben spesse, facili da afferrare */
     div[data-baseweb="slider"] div[role="slider"] {{
@@ -672,6 +677,85 @@ def toggle_watchlist(symbol, nome):
 
 
 # ---------------------------------------------------------------- INTERFACCIA --
+
+# ---------------------------------------------------- GESTURE SUL GRAFICO --
+# Ponte JS (event delegation sul documento: sopravvive ai re-render Streamlit).
+# Le gesture NON toccano la logica Python: simulano il click sugli stessi
+# pulsanti ◀ Precedenti / Successive ▶ del tab attivo, che restano visibili.
+#   TOUCH   : swipe orizzontale sul grafico (verticale = scroll pagina, libero)
+#   MOUSE   : drag orizzontale tenendo premuto sul grafico
+#   TRACKPAD: scorrimento orizzontale a due dita (la rotellina verticale
+#             continua a scorrere la pagina: zero conflitti)
+GESTURE_JS = """
+<script>
+(function () {
+  const P = window.parent;
+  if (P.__volNavGesture) return;          // guardia anti-doppia iniezione
+  P.__volNavGesture = true;
+  const doc = P.document;
+
+  function grafico(t) {
+    return t && t.closest ? t.closest('div[data-testid="stPlotlyChart"]') : null;
+  }
+  function vaiA(el, direzione) {           // -1 = Precedenti · +1 = Successive
+    const panel = el.closest('div[data-baseweb="tab-panel"]') || doc;
+    const testo = direzione < 0 ? 'Precedenti' : 'Successive';
+    for (const b of panel.querySelectorAll('button')) {
+      if (b.innerText.includes(testo) && !b.disabled) { b.click(); return; }
+    }
+  }
+
+  // TOUCH: swipe orizzontale (soglia 60px, dominanza orizzontale 1.4x)
+  let tx = null, ty = null, tEl = null;
+  doc.addEventListener('touchstart', e => {
+    const el = grafico(e.target); if (!el) return;
+    tEl = el; tx = e.touches[0].clientX; ty = e.touches[0].clientY;
+  }, { passive: true });
+  doc.addEventListener('touchmove', e => {
+    if (tx === null) return;
+    const dx = e.touches[0].clientX - tx, dy = e.touches[0].clientY - ty;
+    if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.4) {
+      e.preventDefault();                  // solo a intento orizzontale accertato
+      vaiA(tEl, dx > 0 ? -1 : 1);          // trascini a destra → indietro nel tempo
+      tx = null;
+    }
+  }, { passive: false });
+  doc.addEventListener('touchend', () => { tx = null; }, { passive: true });
+
+  // MOUSE: drag orizzontale (soglia 80px)
+  let mx = null, my = null, mEl = null;
+  doc.addEventListener('pointerdown', e => {
+    if (e.pointerType !== 'mouse') return;
+    const el = grafico(e.target); if (!el) return;
+    mEl = el; mx = e.clientX; my = e.clientY;
+  });
+  doc.addEventListener('pointermove', e => {
+    if (mx === null) return;
+    const dx = e.clientX - mx, dy = e.clientY - my;
+    if (Math.abs(dx) > 80 && Math.abs(dx) > Math.abs(dy) * 1.4) {
+      vaiA(mEl, dx > 0 ? -1 : 1);
+      mx = null;
+    }
+  });
+  doc.addEventListener('pointerup', () => { mx = null; });
+
+  // TRACKPAD: solo deltaX (due dita in orizzontale); il verticale non si tocca
+  let acc = 0, blocco = 0;
+  doc.addEventListener('wheel', e => {
+    const el = grafico(e.target); if (!el) return;
+    if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return;   // scroll verticale: alla pagina
+    e.preventDefault();
+    const ora = Date.now(); if (ora < blocco) return;
+    acc += e.deltaX;
+    if (Math.abs(acc) > 90) {
+      vaiA(el, acc > 0 ? 1 : -1);          // due dita verso destra → Successive
+      acc = 0; blocco = ora + 450;         // anti-raffica: max ~2 pagine/secondo
+    }
+  }, { passive: false });
+})();
+</script>
+"""
+components.html(GESTURE_JS, height=0)
 
 tab_live, tab_archivio = st.tabs(["📊  Live", "🗄️  Archivio"])
 
