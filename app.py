@@ -220,11 +220,30 @@ def scarica_intraday(symbol: str, interval: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=60, show_spinner=False)
 def prezzo_attuale(symbol: str):
+    """Ultimo prezzo + chiusura del giorno precedente. La chiusura precedente
+    è il pilastro della % cumulativa: se fast_info non la fornisce o è sporca,
+    si ricava dallo storico giornaliero ufficiale (candele daily)."""
+    ultimo, prec = None, None
     try:
         fi = yf.Ticker(symbol).fast_info
-        return fi.get("last_price"), fi.get("previous_close")
+        ultimo = fi.get("last_price")
+        prec = fi.get("previous_close")
     except Exception:
-        return None, None
+        pass
+    try:
+        h = yf.Ticker(symbol).history(period="7d", interval="1d",
+                                      prepost=False, auto_adjust=False)
+        if h is not None and len(h) >= 2:
+            prec_daily = float(h["Close"].iloc[-2])
+            # se fast_info manca o diverge oltre lo 0.5% dal daily ufficiale,
+            # vince il daily (fast_info a volte è ritardato o rettificato)
+            if not prec or abs(prec / prec_daily - 1) > 0.005:
+                prec = prec_daily
+            if not ultimo:
+                ultimo = float(h["Close"].iloc[-1])
+    except Exception:
+        pass
+    return ultimo, prec
 
 
 # ----------------------------------------------------------------- GRAFICO --
@@ -264,21 +283,32 @@ def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str,
     navigatore sotto il grafico. Drag disattivato: la pagina scorre sempre."""
     n = len(df)
 
-    # base del delta %: la CHIUSURA DELLA CANDELA PRECEDENTE (candela per
-    # candela). La prima candela della giornata si confronta con la chiusura
-    # del giorno precedente; se non disponibile, con la propria apertura.
-    rif_serie = df["Close"].shift(1)
-    base_prima = (float(chiusura_prec) if (chiusura_prec and chiusura_prec > 0)
-                  else float(df["Open"].iloc[0]))
-    rif_serie.iloc[0] = base_prima
-    rif_nome = "candela prec."
+    # ------------------------------------------------ MATEMATICA ETICHETTE --
+    # (1) VARIAZIONE CUMULATIVA vs CHIUSURA DI IERI (dato principale, grande):
+    #     var_cum[i] = (Close[i] / chiusura_prec - 1) * 100
+    #     L'ultima candela coincide col dato ufficiale di giornata del broker.
+    #     Fallback per i vecchi snapshot senza chiusura_prec: apertura del giorno.
+    if chiusura_prec and chiusura_prec > 0:
+        base_cum, base_nome = float(chiusura_prec), "chiusura ieri"
+    else:
+        base_cum, base_nome = float(df["Open"].iloc[0]), "apertura giorno"
+    var_cum = (df["Close"] / base_cum - 1) * 100
+    # colore rigorosamente legato al segno CUMULATIVO: VERDE >= 0, ROSSO < 0
+    colori_cum = [VERDE if p >= 0 else ROSSO for p in var_cum]
+
+    # (2) DELTA INTRA-CANDELA (dato secondario, piccolo):
+    #     var_delta[i] = (Close[i] / Close[i-1] - 1) * 100
+    #     Prima candela del grafico: rispetto al proprio Open (nessun i-1).
+    rif_delta = df["Close"].shift(1)
+    rif_delta.iloc[0] = float(df["Open"].iloc[0])
+    var_delta = (df["Close"] / rif_delta - 1) * 100
 
     mediana = float(df["Volume"].median()) or 1.0
     rvol = df["Volume"] / mediana
     anomala = rvol >= SOGLIA_ANOMALIA
 
     labels = [ts.strftime("%H:%M") for ts in df.index]
-    x_idx = list(range(n))                       # asse lineare: serve al rangeslider
+    x_idx = list(range(n))                       # asse lineare (finestra paginata)
     passo = max(1, n // 10)
     tickvals = x_idx[::passo]
     ticktext = labels[::passo]
@@ -287,19 +317,18 @@ def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str,
     bordi = [ORO if a else "rgba(0,0,0,0)" for a in anomala]
     spess = [2.5 if a else 0 for a in anomala]
 
-    # variazione % di ogni chiusura rispetto alla chiusura della candela precedente
-    var_rif = (df["Close"] / rif_serie - 1) * 100
-    # coerenza rigorosa dei colori: VERDE se >= 0, ROSSO se < 0
-    colori_testo = [VERDE if p >= 0 else ROSSO for p in var_rif]
-
+    # ------------------------------------------------- STRUTTURA ETICHETTA --
+    # Riga 1 (13px): volume + eventuale anomalia ×N
+    # Riga 2 (20px, bold, colore condizionale): prezzo + var CUMULATIVA vs ieri
+    # Riga 3 (12px, grigio): Δ scostamento vs candela precedente
     etichette = [
         (
             f"<b>{fmt_vol(v)}{f' ×{r:.1f}' if a else ''}</b><br>"
-            f"{fmt_px(c)}<br>"
-            f"<span style='font-size:20px;color:{col}'><b>{p:+.2f}%</b></span>"
+            f"<span style='font-size:20px;color:{col}'><b>{fmt_px(c)} {pc:+.2f}%</b></span><br>"
+            f"<span style='font-size:12px;color:{TESTO_SOFT}'>Δ {pdlt:+.2f}%</span>"
         )
-        for v, c, p, r, a, col in zip(
-            df["Volume"], df["Close"], var_rif, rvol, anomala, colori_testo
+        for v, c, pc, pdlt, r, a, col in zip(
+            df["Volume"], df["Close"], var_cum, var_delta, rvol, anomala, colori_cum
         )
     ]
     var_candela = (df["Close"] / df["Open"] - 1) * 100
@@ -318,15 +347,15 @@ def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str,
             cliponaxis=True,   # con lo zoom verticale le etichette non escono dal grafico
             customdata=list(zip(
                 df["Open"].round(4), df["Close"].round(4),
-                var_candela.round(2), var_rif.round(2),
+                var_candela.round(2), var_cum.round(2),
                 [fmt_vol(v) for v in df["Volume"]], rvol.round(1),
-                labels, rif_serie.round(4),
+                labels, var_delta.round(2),
             )),
             hovertemplate=(
                 "<b>%{customdata[6]}</b><br>"
                 "Open %{customdata[0]}  ·  Close %{customdata[1]}<br>"
-                "Var candela %{customdata[2]}%<br>"
-                "Var vs chiusura prec. (%{customdata[7]}) <b>%{customdata[3]}%</b><br>"
+                f"Var vs {base_nome} ({fmt_px(base_cum)}) " + "<b>%{customdata[3]}%</b><br>"
+                "Δ vs candela prec. %{customdata[7]}%  ·  Var candela %{customdata[2]}%<br>"
                 "Volume <b>%{customdata[4]}</b> · ×%{customdata[5]} vs mediana"
                 "<extra></extra>"
             ),
