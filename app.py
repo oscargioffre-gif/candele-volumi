@@ -199,10 +199,12 @@ def scarica_intraday(symbol: str, interval: str) -> pd.DataFrame:
     tk = yf.Ticker(symbol)
     ora = pd.Timestamp.now(tz="Europe/Rome")
 
-    df5 = _pulisci(tk.history(
-        start=ora.normalize(), end=ora + pd.Timedelta(hours=1),
-        interval="5m", prepost=False, auto_adjust=False,
-    ))
+    df5 = pd.DataFrame()
+    if ora.weekday() < 5:  # nel weekend niente sessione odierna: dritti al fallback
+        df5 = _pulisci(tk.history(
+            start=ora.normalize(), end=ora + pd.Timedelta(hours=1),
+            interval="5m", prepost=False, auto_adjust=False,
+        ))
     if df5.empty:  # mercato chiuso oggi: ultima sessione disponibile
         df5 = _pulisci(tk.history(
             period="1d", interval="5m", prepost=False, auto_adjust=False,
@@ -538,13 +540,13 @@ with tab_live:
         tf_label = st.radio("Timeframe", list(TIMEFRAMES), horizontal=True, index=0)
     with c3:
         st.write("")
-        aggiorna = st.button("↻ Aggiorna", use_container_width=True)
+        aggiorna = st.button("↻ Aggiorna", width="stretch")
     with c4:
         st.write("")
-        salva = st.button("💾 Salva", use_container_width=True)
+        salva = st.button("💾 Salva", width="stretch")
     with c5:
         st.write("")
-        watch = st.button("⭐ Watchlist", use_container_width=True,
+        watch = st.button("⭐ Watchlist", width="stretch",
                           help="Aggiungi/rimuovi dal salvataggio automatico serale")
 
     if aggiorna:
@@ -593,7 +595,7 @@ with tab_live:
                     df, f"Volumi {tf_label} — {df.index[-1]:%d/%m/%Y}", tf_label,
                     zoom_v, chiusura_prec,
                 )
-                st.plotly_chart(fig, use_container_width=True, config={
+                st.plotly_chart(fig, width="stretch", config={
                     **CONFIG_GRAFICO,
                     "toImageButtonOptions": {"format": "png", "filename": f"{symbol}_volumi", "scale": 2},
                 })
@@ -712,7 +714,7 @@ with tab_archivio:
                     st.plotly_chart(
                         costruisci_figura(df_s, f"Volumi {tf_lbl} — {snap['d']}", tf_lbl,
                                           zoom_a, snap.get("pc")),
-                        use_container_width=True,
+                        width="stretch",
                         config=CONFIG_GRAFICO,
                     )
                 else:
