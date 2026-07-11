@@ -235,25 +235,31 @@ def fmt_px(p: float) -> str:
 
 ORO = "#FFD54F"          # bordo delle barre con volume anomalo
 SOGLIA_ANOMALIA = 3.0    # volume ≥ 3× la mediana di giornata = possibile mano forte
+BARRE_VISIBILI = 12      # candele visibili di default: larghe e leggibili su mobile
+VERDE_TESTO = "#00E676"  # variazione positiva vs chiusura precedente
+ROSSO_TESTO = "#FF5252"  # variazione negativa vs chiusura precedente
 
 
 def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str,
-                      zoom_pct: int = 100) -> go.Figure:
-    """Grafico a barre di volume: altezza = volume, colore = direzione candela.
-    Etichetta su due righe: volume (K/M) + prezzo chiusura + var % vs apertura
-    del giorno. Barre ≥ SOGLIA_ANOMALIA × mediana evidenziate in oro (×N).
+                      zoom_pct: int = 100, chiusura_prec: float = None) -> go.Figure:
+    """Grafico a barre di volume: altezza = volume, colore barra = direzione
+    candela. Etichetta grande su due righe: volume (K/M) + prezzo con la
+    variazione % rispetto alla CHIUSURA DEL GIORNO PRECEDENTE; l'etichetta è
+    VERDE se il titolo in quel momento guadagna, ROSSA se perde.
+    Barre ≥ SOGLIA_ANOMALIA × mediana bordate in oro con il moltiplicatore ×N.
 
-    Mobile UX:
-    - dragmode disattivato → il dito che scorre sul grafico NON zooma:
-      lo scroll verticale della pagina ha sempre la priorità;
-    - navigatore orizzontale spesso sotto il grafico (rangeslider) per
-      scorrere/zoomare nel tempo trascinando le maniglie;
-    - zoom_pct (10-100) limita l'asse Y per ingrandire le barre piccole."""
+    Mobile UX: di default sono visibili le ultime BARRE_VISIBILI candele,
+    larghe e ben distanziate; le precedenti si raggiungono trascinando il
+    navigatore sotto il grafico. Drag disattivato: la pagina scorre sempre."""
     n = len(df)
-    # etichette grandi, ridotte solo quando le barre diventano tante
-    size_txt = 17 if n <= 14 else 15 if n <= 26 else 13 if n <= 44 else 11
 
-    apertura_giorno = float(df["Open"].iloc[0])
+    # riferimento per la variazione %: chiusura del giorno precedente;
+    # se non disponibile (vecchi snapshot) si ripiega sull'apertura del giorno
+    if chiusura_prec and chiusura_prec > 0:
+        rif, rif_nome = float(chiusura_prec), "chiusura prec."
+    else:
+        rif, rif_nome = float(df["Open"].iloc[0]), "apertura giorno"
+
     mediana = float(df["Volume"].median()) or 1.0
     rvol = df["Volume"] / mediana
     anomala = rvol >= SOGLIA_ANOMALIA
@@ -268,13 +274,15 @@ def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str,
     bordi = [ORO if a else "rgba(0,0,0,0)" for a in anomala]
     spess = [2.5 if a else 0 for a in anomala]
 
-    var_giorno = (df["Close"] / apertura_giorno - 1) * 100
+    var_rif = (df["Close"] / rif - 1) * 100
     etichette = [
-        (f"<b>{fmt_vol(v)} ×{r:.1f}</b><br>{fmt_px(c)} {p:+.2f}%"
+        (f"<b>{fmt_vol(v)} ×{r:.1f}</b><br><b>{fmt_px(c)} {p:+.2f}%</b>"
          if a else
-         f"<b>{fmt_vol(v)}</b><br>{fmt_px(c)} {p:+.2f}%")
-        for v, c, p, r, a in zip(df["Volume"], df["Close"], var_giorno, rvol, anomala)
+         f"<b>{fmt_vol(v)}</b><br><b>{fmt_px(c)} {p:+.2f}%</b>")
+        for v, c, p, r, a in zip(df["Volume"], df["Close"], var_rif, rvol, anomala)
     ]
+    # color coding condizionale: etichetta verde se guadagna, rossa se perde
+    colori_testo = [VERDE_TESTO if p >= 0 else ROSSO_TESTO for p in var_rif]
     var_candela = (df["Close"] / df["Open"] - 1) * 100
 
     fig = go.Figure(
@@ -285,12 +293,13 @@ def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str,
             marker_line=dict(color=bordi, width=spess),
             text=etichette,
             textposition="outside",
-            textfont=dict(family="Inter", size=size_txt, color=TESTO),
+            # font grande e fisso: la finestra è limitata a BARRE_VISIBILI candele
+            textfont=dict(family="Inter", size=16, color=colori_testo),
             textangle=0,
             cliponaxis=True,   # con lo zoom verticale le etichette non escono dal grafico
             customdata=list(zip(
                 df["Open"].round(4), df["Close"].round(4),
-                var_candela.round(2), var_giorno.round(2),
+                var_candela.round(2), var_rif.round(2),
                 [fmt_vol(v) for v in df["Volume"]], rvol.round(1),
                 labels,
             )),
@@ -298,7 +307,7 @@ def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str,
                 "<b>%{customdata[6]}</b><br>"
                 "Open %{customdata[0]}  ·  Close %{customdata[1]}<br>"
                 "Var candela %{customdata[2]}%<br>"
-                "Var da apertura giorno <b>%{customdata[3]}%</b><br>"
+                f"Var vs {rif_nome} ({fmt_px(rif)}) " + "<b>%{customdata[3]}%</b><br>"
                 "Volume <b>%{customdata[4]}</b> · ×%{customdata[5]} vs mediana"
                 "<extra></extra>"
             ),
@@ -311,16 +320,19 @@ def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str,
         font=dict(family="Inter", color=TESTO),
         margin=dict(l=10, r=10, t=48, b=10),
         height=680,
-        bargap=0.25,
+        bargap=0.12,           # colonne larghe: il grosso dello spazio è barra
         showlegend=False,
-        hoverlabel=dict(bgcolor=PANNELLO, font_family="Inter"),
+        hoverlabel=dict(bgcolor=PANNELLO, font=dict(family="Inter", size=14)),
         dragmode=False,        # il drag col dito NON zooma: la pagina scorre
     )
+    # finestra iniziale: le ultime BARRE_VISIBILI candele, larghe e leggibili;
+    # le precedenti si raggiungono trascinando il navigatore sottostante
+    x0 = max(-0.6, n - BARRE_VISIBILI - 0.6)
     fig.update_xaxes(
         showgrid=False,
         tickvals=tickvals, ticktext=ticktext,
-        tickfont=dict(size=12, color=TESTO_SOFT),
-        range=[-0.6, n - 0.4],
+        tickfont=dict(size=13, color=TESTO),
+        range=[x0, n - 0.4],
         # "scrollbar" orizzontale: spessa, trascinabile, sotto il grafico
         rangeslider=dict(
             visible=True,
@@ -332,7 +344,7 @@ def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str,
     )
     fig.update_yaxes(
         gridcolor=GRIGLIA, gridwidth=0.4, zeroline=False,
-        tickfont=dict(size=12, color=TESTO_SOFT),
+        tickfont=dict(size=13, color=TESTO),
         fixedrange=True,       # niente zoom accidentale in verticale
         # zoom Y esplicito via slider: 100% = tutto, 10% = ingrandisce le barre piccole
         range=[0, float(df["Volume"].max()) * 1.35 * max(10, min(100, zoom_pct)) / 100],
@@ -412,10 +424,11 @@ def carica_indice(forza=False):
     return indice
 
 
-def salva_snapshot(symbol, nome, tf_label, df: pd.DataFrame):
+def salva_snapshot(symbol, nome, tf_label, df: pd.DataFrame, chiusura_prec=None):
     """Salva il grafico corrente. Un solo file per titolo+giorno contenente
     tutti i timeframe salvati: il salvataggio manuale si fonde (merge) con
-    quello automatico notturno senza duplicati. Costo: 2 PUT."""
+    quello automatico notturno senza duplicati. Costo: 2 PUT.
+    'pc' = chiusura del giorno precedente: serve alle % anche in archivio."""
     data_str = df.index[-1].strftime("%Y-%m-%d")
     tf = TIMEFRAMES[tf_label]
     file_path = f"archive/{symbol.replace('.', '_')}/{data_str}.json.gz"
@@ -431,6 +444,8 @@ def salva_snapshot(symbol, nome, tf_label, df: pd.DataFrame):
         payload = json.loads(gzip.decompress(raw_old).decode())
     else:
         payload = {"s": symbol, "n": nome, "d": data_str, "tfs": {}}
+    if chiusura_prec and not payload.get("pc"):
+        payload["pc"] = round(float(chiusura_prec), 4)
     payload["tfs"][tf] = candele
 
     raw = gzip.compress(json.dumps(payload, separators=(",", ":")).encode(), 9)
@@ -559,7 +574,8 @@ with tab_live:
                     key="zoom_live",
                 )
                 fig = costruisci_figura(
-                    df, f"Volumi {tf_label} — {df.index[-1]:%d/%m/%Y}", tf_label, zoom_v
+                    df, f"Volumi {tf_label} — {df.index[-1]:%d/%m/%Y}", tf_label,
+                    zoom_v, chiusura_prec,
                 )
                 st.plotly_chart(fig, use_container_width=True, config={
                     **CONFIG_GRAFICO,
@@ -579,7 +595,7 @@ with tab_live:
                     token, repo = gh_config()
                     if not token or not repo:
                         st.error("Configura GITHUB_TOKEN e GITHUB_REPO nei Secrets di Streamlit.")
-                    elif salva_snapshot(symbol, nome, tf_label, df):
+                    elif salva_snapshot(symbol, nome, tf_label, df, chiusura_prec):
                         st.success(f"Salvato in archivio: {symbol} · {df.index[-1]:%d/%m/%Y} · {tf_label}")
                     else:
                         st.error("Salvataggio non riuscito. Verifica token e nome repository.")
@@ -678,7 +694,8 @@ with tab_archivio:
                         key="zoom_arch",
                     )
                     st.plotly_chart(
-                        costruisci_figura(df_s, f"Volumi {tf_lbl} — {snap['d']}", tf_lbl, zoom_a),
+                        costruisci_figura(df_s, f"Volumi {tf_lbl} — {snap['d']}", tf_lbl,
+                                          zoom_a, snap.get("pc")),
                         use_container_width=True,
                         config=CONFIG_GRAFICO,
                     )

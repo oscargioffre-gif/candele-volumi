@@ -73,6 +73,21 @@ def aggrega(df5, interval):
     return agg[agg["Volume"] > 0]
 
 
+def chiusura_precedente(symbol, data_str):
+    """Chiusura del giorno di borsa precedente a data_str (per le % in archivio)."""
+    try:
+        h = yf.Ticker(symbol).history(period="7d", interval="1d", auto_adjust=False)
+        if h is None or len(h) < 2:
+            return None
+        giorni = [d.strftime("%Y-%m-%d") for d in h.index]
+        i = giorni.index(data_str) if data_str in giorni else len(giorni) - 1
+        if i >= 1:
+            return round(float(h["Close"].iloc[i - 1]), 4)
+    except Exception as e:
+        print(f"{symbol}: chiusura precedente non disponibile ({e})")
+    return None
+
+
 def main():
     watchlist = leggi_json(WATCHLIST, [])
     if not watchlist:
@@ -121,6 +136,10 @@ def main():
         if os.path.exists(file_path):
             with gzip.open(file_path, "rt", encoding="utf-8") as f:
                 payload = json.load(f)
+        if not payload.get("pc"):
+            pc = chiusura_precedente(symbol, data_str)
+            if pc:
+                payload["pc"] = pc
         payload["tfs"].update(tfs)
 
         with gzip.open(file_path, "wt", encoding="utf-8", compresslevel=9) as f:
