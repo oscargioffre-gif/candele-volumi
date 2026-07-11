@@ -243,7 +243,8 @@ ROSSO_TESTO = "#FF5252"  # variazione negativa vs chiusura precedente
 
 
 def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str,
-                      zoom_pct: int = 100, chiusura_prec: float = None) -> go.Figure:
+                      zoom_pct: int = 100, chiusura_prec: float = None,
+                      inizio: int = None, fine: int = None) -> go.Figure:
     """Grafico a barre di volume: altezza = volume, colore barra = direzione
     candela. Etichetta su tre righe sopra ogni barra:
       1) volume (K/M), con ×N se anomalo;
@@ -343,22 +344,18 @@ def costruisci_figura(df: pd.DataFrame, titolo: str, timeframe: str,
         hoverlabel=dict(bgcolor=PANNELLO, font=dict(family="Inter", size=14)),
         dragmode=False,        # il drag col dito NON zooma: la pagina scorre
     )
-    # finestra iniziale: le ultime BARRE_VISIBILI candele, larghe e leggibili;
-    # le precedenti si raggiungono trascinando il navigatore sottostante
-    x0 = max(-0.6, n - BARRE_VISIBILI - 0.6)
+    # finestra visibile: indici [inizio, fine) passati dalla paginazione a
+    # frecce (session_state); default = le ultime BARRE_VISIBILI candele
+    if fine is None or fine > n:
+        fine = n
+    if inizio is None or inizio < 0:
+        inizio = max(0, fine - BARRE_VISIBILI)
     fig.update_xaxes(
         showgrid=False,
         tickvals=tickvals, ticktext=ticktext,
         tickfont=dict(size=13, color=TESTO),
-        range=[x0, n - 0.4],
-        # "scrollbar" orizzontale: spessa, trascinabile, sotto il grafico
-        rangeslider=dict(
-            visible=True,
-            thickness=0.16,
-            bgcolor=PANNELLO,
-            bordercolor=GRIGLIA,
-            borderwidth=1,
-        ),
+        range=[inizio - 0.6, fine - 0.4],
+        rangeslider=dict(visible=False),   # niente barra Plotly: frecce native
     )
     fig.update_yaxes(
         gridcolor=GRIGLIA, gridwidth=0.4, zeroline=False,
@@ -381,6 +378,51 @@ CONFIG_GRAFICO = {
         "zoomIn2d", "zoomOut2d", "autoScale2d",
     ],
 }
+
+
+# ------------------------------------------------ PAGINAZIONE CON LE FRECCE --
+# Sostituisce il rangeslider Plotly: due pulsanti nativi Streamlit, grandi e
+# comodi su mobile. L'offset (candele indietro dalla fine) vive in
+# st.session_state: 0 = finestra sulle ULTIME candele (default).
+
+
+def azzera_pagina_se_cambiato(chiave: str, contesto: str):
+    """Riporta la finestra alle ultime candele quando cambia titolo/timeframe."""
+    if st.session_state.get(f"{chiave}_ctx") != contesto:
+        st.session_state[f"{chiave}_ctx"] = contesto
+        st.session_state[chiave] = 0
+
+
+def naviga_finestra(n: int, labels: list, chiave: str):
+    """Renderizza '◀ Precedenti · info finestra · Successive ▶' e ritorna gli
+    indici [inizio, fine) della finestra corrente. Gestisce i limiti: le frecce
+    si disattivano da sole a inizio e fine serie (nessun IndexError possibile)."""
+    if chiave not in st.session_state:
+        st.session_state[chiave] = 0
+    max_off = max(0, n - BARRE_VISIBILI)
+
+    c_sx, c_info, c_dx = st.columns([1, 3, 1])
+    prec = c_sx.button("◀ Precedenti", key=f"{chiave}_prec", width="stretch",
+                       disabled=st.session_state[chiave] >= max_off)
+    succ = c_dx.button("Successive ▶", key=f"{chiave}_succ", width="stretch",
+                       disabled=st.session_state[chiave] <= 0)
+    if prec:
+        st.session_state[chiave] = min(st.session_state[chiave] + BARRE_VISIBILI, max_off)
+    if succ:
+        st.session_state[chiave] = max(st.session_state[chiave] - BARRE_VISIBILI, 0)
+
+    off = min(st.session_state[chiave], max_off)   # clamp anche se n è diminuito
+    fine = n - off
+    inizio = max(0, fine - BARRE_VISIBILI)
+    tot_pagine = max(1, -(-n // BARRE_VISIBILI))
+    pagina = max(1, tot_pagine - (-(-off // BARRE_VISIBILI)))
+    c_info.markdown(
+        f"<p style='text-align:center;color:{TESTO_SOFT};margin:6px 0 0'>"
+        f"🕐 {labels[inizio]} – {labels[fine - 1]} &nbsp;·&nbsp; "
+        f"pagina {pagina} di {tot_pagine}</p>",
+        unsafe_allow_html=True,
+    )
+    return inizio, fine
 
 
 # --------------------------------------------------- PERSISTENZA SU GITHUB --
@@ -591,14 +633,24 @@ with tab_live:
                     min_value=10, max_value=100, value=100, step=10, format="%d%%",
                     key="zoom_live",
                 )
+
+                # Paginazione: i click sulle frecce vengono processati PRIMA di
+                # costruire la figura (il grafico appare comunque sopra le
+                # frecce grazie al container segnaposto) → refresh immediato.
+                azzera_pagina_se_cambiato("pag_live", f"{symbol}_{tf_label}")
+                box_grafico = st.container()
+                etichette_orari = [ts.strftime("%H:%M") for ts in df.index]
+                inizio, fine = naviga_finestra(len(df), etichette_orari, "pag_live")
+
                 fig = costruisci_figura(
                     df, f"Volumi {tf_label} — {df.index[-1]:%d/%m/%Y}", tf_label,
-                    zoom_v, chiusura_prec,
+                    zoom_v, chiusura_prec, inizio, fine,
                 )
-                st.plotly_chart(fig, width="stretch", config={
-                    **CONFIG_GRAFICO,
-                    "toImageButtonOptions": {"format": "png", "filename": f"{symbol}_volumi", "scale": 2},
-                })
+                with box_grafico:
+                    st.plotly_chart(fig, width="stretch", config={
+                        **CONFIG_GRAFICO,
+                        "toImageButtonOptions": {"format": "png", "filename": f"{symbol}_volumi", "scale": 2},
+                    })
 
                 # Export CSV (il PNG si scarica dall'icona fotocamera del grafico)
                 csv = df.assign(Tipo=[tipo_candela(o, c) for o, c in zip(df["Open"], df["Close"])])
@@ -711,12 +763,17 @@ with tab_archivio:
                         min_value=10, max_value=100, value=100, step=10, format="%d%%",
                         key="zoom_arch",
                     )
-                    st.plotly_chart(
-                        costruisci_figura(df_s, f"Volumi {tf_lbl} — {snap['d']}", tf_lbl,
-                                          zoom_a, snap.get("pc")),
-                        width="stretch",
-                        config=CONFIG_GRAFICO,
-                    )
+                    azzera_pagina_se_cambiato("pag_arch", f"{path_sel}_{tf_lbl}")
+                    box_arch = st.container()
+                    orari_arch = [ts.strftime("%H:%M") for ts in df_s.index]
+                    inizio_a, fine_a = naviga_finestra(len(df_s), orari_arch, "pag_arch")
+                    with box_arch:
+                        st.plotly_chart(
+                            costruisci_figura(df_s, f"Volumi {tf_lbl} — {snap['d']}", tf_lbl,
+                                              zoom_a, snap.get("pc"), inizio_a, fine_a),
+                            width="stretch",
+                            config=CONFIG_GRAFICO,
+                        )
                 else:
                     st.error("Impossibile leggere lo snapshot dal repository.")
             else:
